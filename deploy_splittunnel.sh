@@ -136,21 +136,25 @@ log "【阶段】5/7 写入配置文件（nftables / dnsmasq / xray）..."
 # nftables：CN 硬绕过 + 非 CN tproxy
 cat > /etc/nftables.d/99-xray-transparent.nft <<EOF
 #!/usr/sbin/nft -f
+
 table inet xray_tproxy {
 
-  # CN 目的集合：由后续 cn4.nft / cn6.nft 动态灌入
+  # =========================
+  # 集合定义
+  # =========================
   set set_cn4 { type ipv4_addr; flags interval; }
   set set_cn6 { type ipv6_addr; flags interval; }
 
-  # dnsmasq nftset 写入的集合
   set set_proxy4 { type ipv4_addr; flags interval; }
   set set_proxy6 { type ipv6_addr; flags interval; }
 
-  # 设备策略集合（源 IP）
   set set_bypass_src4 { type ipv4_addr; }
   set set_force_wg_src4 { type ipv4_addr; }
   set set_force_proxy_src4 { type ipv4_addr; }
 
+  # =========================
+  # 主链：PREROUTING / mangle
+  # =========================
   chain prerouting_mangle {
     type filter hook prerouting priority mangle; policy accept;
 
@@ -169,24 +173,36 @@ table inet xray_tproxy {
     ip6 daddr fc00::/7 accept
     ip6 daddr ff00::/8 accept
 
+    # 设备级绕过
     ip saddr @set_bypass_src4 return
 
-    # 【硬性要求】CN 目的 IP 在 nftables 层放行，绝不进入 Xray inbound
+    # 【硬性要求】CN 目的 IP 直接放行，绝不进入 Xray
     ip daddr @set_cn4 return
     ip6 daddr @set_cn6 return
 
-    ip saddr @set_force_proxy_src4 goto do_tproxy
-    ip daddr @set_proxy4 goto do_tproxy
-    ip6 daddr @set_proxy6 goto do_tproxy
+    # 强制代理设备
+    ip saddr @set_force_proxy_src4 jump do_tproxy
 
-    meta l4proto { tcp, udp } goto do_tproxy
+    # dnsmasq 命中的代理目的 IP
+    ip daddr @set_proxy4 jump do_tproxy
+    ip6 daddr @set_proxy6 jump do_tproxy
+
+    # 兜底：非 CN 流量
+    meta l4proto { tcp, udp } jump do_tproxy
     return
+  }
 
-    do_tproxy:
-      meta mark $MARK_TPROXY return
-      meta l4proto tcp tproxy to :$XRAY_TPROXY_PORT meta mark set $MARK_TPROXY accept
-      meta l4proto udp tproxy to :$XRAY_TPROXY_PORT meta mark set $MARK_TPROXY accept
-      return
+  # =========================
+  # 子链：TPROXY 处理
+  # =========================
+  chain do_tproxy {
+
+    # 防止重复处理
+    meta mark 0x1 return
+
+    meta l4proto tcp tproxy to :12345 meta mark set 0x1 accept
+    meta l4proto udp tproxy to :12345 meta mark set 0x1 accept
+    return
   }
 }
 EOF
