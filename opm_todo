@@ -214,6 +214,11 @@ DNS：
   - Xray 内 geosite / geoip 分流
   - dnsmasq ipset / nftset 前置分流
 - 必须说明性能、conntrack、UDP、MTU、DNS 缓存等风险
+- 所有脚本必须通过 `sh -n` 语法校验
+- nftables 规则必须可通过 `nft -c -f` 校验
+- 若大陆流量进入 Xray inbound，即视为失败
+- conf.d 结构必须说明 Xray 加载方式，否则退回单文件
+- 所有 fallback 必须体现在配置文件而非文字
 
 ────────────────────────────────
 最终目标
