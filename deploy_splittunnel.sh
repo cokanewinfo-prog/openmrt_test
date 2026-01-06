@@ -137,13 +137,19 @@ log "【阶段】5/7 写入配置文件（nftables / dnsmasq / xray）..."
 cat > /etc/nftables.d/99-xray-transparent.nft <<EOF
 #!/usr/sbin/nft -f
 table inet xray_tproxy {
-  set set_cn4 { type ipv4_addr; flags interval; elements = { } }
-  set set_cn6 { type ipv6_addr; flags interval; elements = { } }
-  set set_proxy4 { type ipv4_addr; flags interval; elements = { } }
-  set set_proxy6 { type ipv6_addr; flags interval; elements = { } }
-  set set_bypass_src4 { type ipv4_addr; elements = { } }
-  set set_force_wg_src4 { type ipv4_addr; elements = { } }
-  set set_force_proxy_src4 { type ipv4_addr; elements = { } }
+
+  # CN 目的集合：由后续 cn4.nft / cn6.nft 动态灌入
+  set set_cn4 { type ipv4_addr; flags interval; }
+  set set_cn6 { type ipv6_addr; flags interval; }
+
+  # dnsmasq nftset 写入的集合
+  set set_proxy4 { type ipv4_addr; flags interval; }
+  set set_proxy6 { type ipv6_addr; flags interval; }
+
+  # 设备策略集合（源 IP）
+  set set_bypass_src4 { type ipv4_addr; }
+  set set_force_wg_src4 { type ipv4_addr; }
+  set set_force_proxy_src4 { type ipv4_addr; }
 
   chain prerouting_mangle {
     type filter hook prerouting priority mangle; policy accept;
