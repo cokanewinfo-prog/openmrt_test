@@ -28,8 +28,8 @@ RT_WG="200"           # policy routing table for wg0
 
 CN_DNS1="223.5.5.5"
 CN_DNS2="119.29.29.29"
-XRAY_DNS_LISTEN="127.0.0.1"
-XRAY_DNS_PORT="5353"
+XRAY_DNS_LISTEN="223.5.5.5 / 119.29.29.29"
+XRAY_DNS_PORT=""
 
 # CN IP 列表数据源（可访问 GitHub 时使用）
 CHNROUTE_URL="https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt"
@@ -252,7 +252,7 @@ log-queries=0
 log-facility=/tmp/dnsmasq.log
 
 # 默认走本机 Xray DNS（非 CN 域名会经 wg0 出国解析，避免污染/泄漏）
-server=$XRAY_DNS_LISTEN#$XRAY_DNS_PORT
+server=$XRAY_DNS_LISTEN
 
 # 国内上游 DNS（直连）
 server=$CN_DNS1
