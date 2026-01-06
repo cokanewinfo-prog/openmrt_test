@@ -135,77 +135,57 @@ log "【阶段】5/7 写入配置文件（nftables / dnsmasq / xray）..."
 
 # nftables：CN 硬绕过 + 非 CN tproxy
 cat > /etc/nftables.d/99-xray-transparent.nft <<EOF
-#!/usr/sbin/nft -f
+# 该文件会被 fw4 include 到 table inet fw4 内部，禁止写 table 语句
 
-table inet xray_tproxy {
+set xray_set_cn4 { type ipv4_addr; flags interval; }
+set xray_set_cn6 { type ipv6_addr; flags interval; }
 
-  # =========================
-  # 集合定义
-  # =========================
-  set set_cn4 { type ipv4_addr; flags interval; }
-  set set_cn6 { type ipv6_addr; flags interval; }
+set xray_set_proxy4 { type ipv4_addr; flags interval; }
+set xray_set_proxy6 { type ipv6_addr; flags interval; }
 
-  set set_proxy4 { type ipv4_addr; flags interval; }
-  set set_proxy6 { type ipv6_addr; flags interval; }
+set xray_set_bypass_src4 { type ipv4_addr; }
+set xray_set_force_proxy_src4 { type ipv4_addr; }
 
-  set set_bypass_src4 { type ipv4_addr; }
-  set set_force_wg_src4 { type ipv4_addr; }
-  set set_force_proxy_src4 { type ipv4_addr; }
+chain xray_prerouting_mangle {
+  type filter hook prerouting priority mangle; policy accept;
 
-  # =========================
-  # 主链：PREROUTING / mangle
-  # =========================
-  chain prerouting_mangle {
-    type filter hook prerouting priority mangle; policy accept;
+  ct state established,related accept
 
-    ct state established,related accept
+  iifname "lo" accept
+  ip daddr 127.0.0.0/8 accept
+  ip daddr 224.0.0.0/4 accept
+  ip daddr 255.255.255.255 accept
+  ip daddr 192.168.0.0/16 accept
+  ip daddr 10.0.0.0/8 accept
+  ip daddr 172.16.0.0/12 accept
 
-    iifname "lo" accept
-    ip daddr 127.0.0.0/8 accept
-    ip daddr 224.0.0.0/4 accept
-    ip daddr 255.255.255.255 accept
-    ip daddr 192.168.0.0/16 accept
-    ip daddr 10.0.0.0/8 accept
-    ip daddr 172.16.0.0/12 accept
+  ip6 daddr ::1 accept
+  ip6 daddr fe80::/10 accept
+  ip6 daddr fc00::/7 accept
+  ip6 daddr ff00::/8 accept
 
-    ip6 daddr ::1 accept
-    ip6 daddr fe80::/10 accept
-    ip6 daddr fc00::/7 accept
-    ip6 daddr ff00::/8 accept
+  ip saddr @xray_set_bypass_src4 return
 
-    # 设备级绕过
-    ip saddr @set_bypass_src4 return
+  # CN 硬绕过
+  ip daddr @xray_set_cn4 return
+  ip6 daddr @xray_set_cn6 return
 
-    # 【硬性要求】CN 目的 IP 直接放行，绝不进入 Xray
-    ip daddr @set_cn4 return
-    ip6 daddr @set_cn6 return
+  ip saddr @xray_set_force_proxy_src4 jump xray_do_tproxy
+  ip daddr @xray_set_proxy4 jump xray_do_tproxy
+  ip6 daddr @xray_set_proxy6 jump xray_do_tproxy
 
-    # 强制代理设备
-    ip saddr @set_force_proxy_src4 jump do_tproxy
+  meta l4proto { tcp, udp } jump xray_do_tproxy
+  return
+}
 
-    # dnsmasq 命中的代理目的 IP
-    ip daddr @set_proxy4 jump do_tproxy
-    ip6 daddr @set_proxy6 jump do_tproxy
-
-    # 兜底：非 CN 流量
-    meta l4proto { tcp, udp } jump do_tproxy
-    return
-  }
-
-  # =========================
-  # 子链：TPROXY 处理
-  # =========================
-  chain do_tproxy {
-
-    # 防止重复处理
-    meta mark 0x1 return
-
-    meta l4proto tcp tproxy to :12345 meta mark set 0x1 accept
-    meta l4proto udp tproxy to :12345 meta mark set 0x1 accept
-    return
-  }
+chain xray_do_tproxy {
+  meta mark $MARK_TPROXY return
+  meta l4proto tcp tproxy to :$XRAY_TPROXY_PORT meta mark set $MARK_TPROXY accept
+  meta l4proto udp tproxy to :$XRAY_TPROXY_PORT meta mark set $MARK_TPROXY accept
+  return
 }
 EOF
+
 
 # dnsmasq：CN 直连上游；其余走本机 Xray DNS；nftset 仍保留（便于后期扩展域名列表）
 cat > /etc/dnsmasq.d/split.conf <<EOF
