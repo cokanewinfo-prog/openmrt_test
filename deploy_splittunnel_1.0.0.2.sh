@@ -351,7 +351,7 @@ END{
 ' /tmp/cn4.clean.txt > /root/splittunnel/ipset/cn4.nft || fail "生成 cn4.nft 失败。" "检查磁盘空间与文件权限。"
 
 #========================
-# 写入 nftables 规则文件（修复：不使用 define 宏；不写空 elements）
+# 写入 nftables 规则文件（修复：不使用 define 宏；不写空 elements；tproxy 明确指定 ip family）
 #========================
 cat > /etc/nftables.d/99-xray-transparent.nft <<EOF
 #!/usr/sbin/nft -f
@@ -394,13 +394,13 @@ table inet xray_tproxy {
     # 5) 【强制硬绕过】CN 目的 IP：必须在任何 tproxy 动作之前 return
     ip daddr @set_cn4 return
 
-    # 6) dnsmasq 动态集合优先引流
+    # 6) dnsmasq 动态集合优先引流（关键修复：tproxy 明确指定 ip family）
     ip daddr @set_force_wg0_v4 meta l4proto { tcp, udp } ct state new \\
-      ct mark set 1 meta mark set 1 tproxy to :$TPROXY_PORT accept
+      ct mark set 1 meta mark set 1 tproxy ip to :$TPROXY_PORT accept
 
-    # 7) 默认：非 CN TCP/UDP 透明引流进入 Xray
+    # 7) 默认：非 CN TCP/UDP 透明引流进入 Xray（关键修复：tproxy 明确指定 ip family）
     meta l4proto { tcp, udp } ct state new \\
-      ct mark set 1 meta mark set 1 tproxy to :$TPROXY_PORT accept
+      ct mark set 1 meta mark set 1 tproxy ip to :$TPROXY_PORT accept
   }
 }
 EOF
@@ -411,6 +411,7 @@ if ! nft -c -f /etc/nftables.d/99-xray-transparent.nft >/dev/null 2>&1; then
   nft -c -f /etc/nftables.d/99-xray-transparent.nft 2>&1 | sed -n '1,120p' | tee -a "$LOG_FILE"
   fail "nftables 规则语法检查未通过。" "重点检查：/root/splittunnel/ipset/cn4.nft 是否有脏行；以及内核模块是否齐全。"
 fi
+
 
 #========================
 # 写入 Xray conf.d（工程拆分）
