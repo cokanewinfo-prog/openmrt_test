@@ -1,0 +1,41 @@
+请为 OpenWrt 23.05（BusyBox sh）生成一个旁路由分流一键部署脚本，要求：
+
+网络拓扑：
+- LAN 子网 192.168.88.0/24
+- 主路由 192.168.88.1
+- 旁路由固定 IP 192.168.88.200（接口 br-lan）
+- WireGuard 接口 wg0 已存在且可用（允许 0.0.0.0/0）
+
+分流策略（优先级）：
+1) 以 IP 分流为主：CN IP 段直连（旁路由作为网关转发给主路由），非 CN 走透明代理（TPROXY → Xray → wg0）
+2) 域名补丁：列出一组主流域名（google/youtube/github/openai 等）强制走 wg0，且必须优先于 CN 直连规则（可通过 sniffing 实现）
+
+实现方式：
+- nftables：在 prerouting mangle 做 TPROXY（tcp+udp），对 set_cn4（CN IP set）return；对私有地址/本地地址 return；对主路由 IP 和旁路由 IP return；对非 CN 执行 tproxy 到 127.0.0.1:12345 并打 mark 0x1
+- fw4 集成：通过 firewall include（type=nftables, position=ruleset-pre）顶层注入 nft ruleset，避免 reload 后规则重复
+- 策略路由：
+  - fwmark 0x1 lookup 100，table 100: local default dev lo（TPROXY 回环）
+  - fwmark 0x2 lookup 200，table 200: default dev wg0
+- Xray：
+  - 单文件 /etc/xray/config.json（避免 includes）
+  - inbound: dokodemo-door tproxy_in 127.0.0.1:12345 followRedirect=true sniffing enabled
+  - inbound: dns_in 127.0.0.1:5353 dokodemo-door udp -> 1.1.1.1:53（此 inbound 必须走 wg0_out）
+  - outbounds: wg0_out freedom sockopt.mark=2；direct freedom
+  - routing：先匹配强制 wg 域名列表 -> wg0_out；再 geosite:cn -> direct；再 geoip:cn/private -> direct；最后默认 -> wg0_out；不能出现 “this rule has no effective fields”
+- dnsmasq：
+  - /etc/dnsmasq.d/split.conf 必须“最小化”，只写 server= 规则和 listen-address=192.168.88.200，不能写 bind-interfaces/strict-order/no-resolv/cache-size 等容易与 OpenWrt 自动生成项冲突的配置
+  - 默认 server=127.0.0.1#5353；对 /.cn/ 及常见国内域名用 223.5.5.5
+  - 确保 /etc/dnsmasq.d 目录存在
+- CNIP 下载：
+  - 优先通过 wg0 下载 CNIP_URL（curl --interface wg0），失败再回落普通下载
+  - CNIP 文件不能为空且行数合理（>1000）
+- BBR：
+  - 安装/尝试启用 kmod-tcp-bbr + fq，写 sysctl net.core.default_qdisc=fq 和 net.ipv4.tcp_congestion_control=bbr
+  - 不支持时只 warn 不中断
+- 日志、备份、回滚、自检：
+  - 有 deploy 日志 /root/deploy_splittunnel.log
+  - 生成 /root/selfcheck_splittunnel.sh
+  - 自检包含：wg0 状态、nft table+counter、xray 端口监听、dnsmasq 是否运行、策略路由是否存在
+  - 备注提示：ICMP(ping) 不代表可用性，以 TCP/HTTPS 为准
+
+请输出“完整可执行脚本”，不要省略任何部分。
