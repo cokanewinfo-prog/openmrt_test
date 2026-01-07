@@ -20,11 +20,12 @@ sh /etc/uci-defaults/70-rootpt-resize
 
 如果根分区已被扩展，并且之前已运行过expand-root.sh脚本，则默认情况下尝试再次运行它不起作用。要执行额外的根扩展，您需要删除之前的脚本标志：
 
-rm /etc/rootpt-resize rm /etc/rootfs-resize
+rm /etc/rootpt-resize
+rm /etc/rootfs-resize
 
 打开/etc/sysupgrade.conf文件，并删除以下行：
 
-/etc/uci-defaults/70-rootpt-resize 
+/etc/uci-defaults/70-rootpt-resize
 /etc/uci-defaults/80-rootfs-resize
 
 这确保了系统不再认为脚本已执行，然后您可以重新运行脚本。
