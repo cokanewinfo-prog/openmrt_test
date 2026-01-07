@@ -1,11 +1,15 @@
-# Install packages
+
+#安装软件包
+
 opkg update
 opkg install parted losetup resize2fs blkid
- 
-# Download expand-root.sh
+
+#Download expand-root.sh
+
 wget -U "" -O expand-root.sh "https://openwrt.org/_export/code/docs/guide-user/advanced/expand_root?codeblock=0"
- 
-# Source the script (creates /etc/uci-defaults/70-rootpt-resize and /etc/uci-defaults/80-rootpt-resize, and adds them to /etc/sysupgrade.conf so they will be re-run after a sysupgrade)
+
+#Source the script （creates /etc/uci-defaults/70-rootpt-resize and /etc/uci-defaults/80-rootpt-resize，并将它们添加到/etc/sysupgrade.conf中，以便它们将在sysupgrade后重新运行）
+
 . ./expand-root.sh
  
 调整根分区和文件系统的大小（将调整分区大小，重新启动调整文件系统大小，然后再次重新启动）
