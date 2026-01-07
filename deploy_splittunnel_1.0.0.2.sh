@@ -1,13 +1,12 @@
 #!/bin/sh
-
 ###############################################################################
 # OpenWrt 23.05 旁路由分流一键部署（nftables + Xray-core + wg0 + dnsmasq-full）
-# 工程交付：可直接部署上线（当前无代理节点）
+# 当前阶段：无代理节点，仅 wg0 出口；非 CN 走 wg0；CN 在 nft 层硬绕过（不进 Xray）
 #
-# 关键修复：
-# 1) nftables 规则文件不再使用 nft 的 define 宏（避免解析成 hostname / mark 失败）
-# 2) nft set 不再写 elements = { } 空集合（避免 “unexpected }”）
-# 3) CN4 nft set 生成逻辑改为无尾逗号、自动过滤脏行、去除 CRLF（避免 nft 解析失败）
+# 关键工程修复（针对你遇到的 fw4 restart 失败）：
+# - fw4 会 include "/etc/nftables.d/*.nft" 并把其内容当作“fw4 table 内片段”解析；
+#   你的独立 table 文件放在 /etc/nftables.d 会导致 fw4 check/restart 解析失败。
+# - 本脚本将独立 nft 表规则落盘到 /etc/nftables.xray/，并通过 /etc/firewall.user 由 fw4 启动后加载。
 ###############################################################################
 
 #========================
@@ -26,6 +25,8 @@ MARK_WG_HEX="0x2"
 TABLE_TPROXY="100"
 TABLE_WG="200"
 
+LOG_FILE="/root/deploy_splittunnel.log"
+
 # 下载源（可按企业内网镜像替换）
 CN4_URL="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 GEOIP_URL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
@@ -37,7 +38,9 @@ DOMESTIC_DNS2="119.29.29.29"
 FOREIGN_DNS1="1.1.1.1"
 FOREIGN_DNS2="8.8.8.8"
 
-LOG_FILE="/root/deploy_splittunnel.log"
+# 独立 nft 文件路径（关键：不要放 /etc/nftables.d）
+NFT_DIR="/etc/nftables.xray"
+NFT_FILE="/etc/nftables.xray/99-xray-transparent.nft"
 
 #========================
 # 工具函数
@@ -59,9 +62,7 @@ run() {
   return 0
 }
 
-exists_cmd() {
-  command -v "$1" >/dev/null 2>&1
-}
+exists_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 #========================
 # 备份与回滚
@@ -94,8 +95,11 @@ rollback_from_dir() {
   fi
 
   log "开始回滚：从备份目录恢复：$dir"
+
+  # 恢复主要文件/目录
   for p in \
-    /etc/nftables.d/99-xray-transparent.nft \
+    "$NFT_FILE" \
+    /etc/firewall.user \
     /etc/xray/config.json \
     /etc/xray/conf.d \
     /etc/dnsmasq.d/split.conf \
@@ -108,12 +112,17 @@ rollback_from_dir() {
     fi
   done
 
+  # 清理可能遗留的旧位置文件（避免 fw4 include 再次炸）
+  run "rm -f /etc/nftables.d/99-xray-transparent.nft" || true
+
+  # 清理策略路由与表
   run "ip rule del fwmark $MARK_TPROXY_HEX lookup $TABLE_TPROXY 2>/dev/null || true"
   run "ip rule del fwmark $MARK_WG_HEX lookup $TABLE_WG 2>/dev/null || true"
   run "ip route flush table $TABLE_TPROXY 2>/dev/null || true"
   run "ip route flush table $TABLE_WG 2>/dev/null || true"
   run "nft delete table inet xray_tproxy 2>/dev/null || true"
 
+  # 重启服务
   run "/etc/init.d/firewall restart || true"
   run "/etc/init.d/dnsmasq restart || true"
   run "/etc/init.d/xray restart || true"
@@ -186,7 +195,8 @@ fi
 make_backup_dir || fail "无法创建备份目录。" "检查 /root 是否可写、空间是否充足。"
 log "备份目录：$BACKUP_DIR"
 
-backup_path "/etc/nftables.d/99-xray-transparent.nft" || fail "备份失败。" "检查文件权限与存储空间。"
+backup_path "$NFT_FILE" || fail "备份失败。" "检查文件权限与存储空间。"
+backup_path "/etc/firewall.user" || fail "备份失败。" "检查文件权限与存储空间。"
 backup_path "/etc/xray" || fail "备份失败。" "检查文件权限与存储空间。"
 backup_path "/etc/dnsmasq.d/split.conf" || fail "备份失败。" "检查文件权限与存储空间。"
 backup_path "/etc/dnsmasq.d/40-cn-domains.conf" || fail "备份失败。" "检查文件权限与存储空间。"
@@ -210,7 +220,7 @@ done
 #========================
 # 写入目录结构与基础文件
 #========================
-run "mkdir -p /etc/nftables.d /etc/xray/conf.d /etc/dnsmasq.d" || fail "创建目录失败。" "检查只读文件系统或空间不足。"
+run "mkdir -p /etc/xray/conf.d /etc/dnsmasq.d" || fail "创建目录失败。" "检查只读文件系统或空间不足。"
 run "mkdir -p /root/splittunnel/domains /root/splittunnel/ipset /root/splittunnel/templates" || fail "创建目录失败。" "检查 /root 可写性。"
 
 cat > /root/splittunnel/domains/proxy_domains.txt <<'EOF'
@@ -230,8 +240,8 @@ EOF
 cat > /root/splittunnel/README.md <<'EOF'
 # OpenWrt 23.05 旁路由分流（nftables + Xray-core + wg0）
 
-## 目标
-- CN 流量：在 nftables 层硬绕过，不进 Xray，转发给主路由直连
+## 关键约束
+- CN 流量：在 nftables 层硬绕过（ip daddr @set_cn4 return），不进入 Xray inbound
 - 非 CN 流量：TPROXY 进入 Xray，仅用于选择出口，当前默认 wg0 出口
 - DNS：非 CN 域名解析走 Xray DNS（127.0.0.1:5353），其对外查询走 wg0，避免泄漏/污染
 
@@ -245,7 +255,7 @@ cat > /root/splittunnel/README.md <<'EOF'
 - templates/
   后期加入代理节点与回退策略模板。
 
-## 设备维度策略
+## 设备维度策略（维护入口）
 - nft 集合：inet xray_tproxy set_bypass_clients
   把某设备源 IP 加进去后，该设备所有流量（包括非 CN）将绕过 Xray，交给主路由直连（便于灰度/排障）。
   示例：
@@ -311,13 +321,18 @@ EOF
 #========================
 log "下载 CN 域名列表（用于 CN 域名走国内 DNS）"
 if run "wget -O /etc/dnsmasq.d/40-cn-domains.conf '$CN_DOMAINS_URL'"; then
-  log "CN 域名列表下载成功：/etc/dnsmasq.d/40-cn-domains.conf"
+  # 将列表里的上游 DNS 统一替换为 DOMESTIC_DNS1（保持可控）
+  #（原列表通常是 114.114.114.114，替换后满足“国内 DNS 直连”要求）
+  run "sed -i 's#/114\\.114\\.114\\.114#/$DOMESTIC_DNS1#g' /etc/dnsmasq.d/40-cn-domains.conf" || true
+  run "sed -i 's#/119\\.29\\.29\\.29#/$DOMESTIC_DNS1#g' /etc/dnsmasq.d/40-cn-domains.conf" || true
+  run "sed -i 's#/223\\.5\\.5\\.5#/$DOMESTIC_DNS1#g' /etc/dnsmasq.d/40-cn-domains.conf" || true
+  log "CN 域名列表已就绪：/etc/dnsmasq.d/40-cn-domains.conf（上游=$DOMESTIC_DNS1）"
 else
   log "警告：CN 域名列表下载失败，将继续部署。建议排查点：WAN/DNS/GitHub 访问/时间同步"
 fi
 
 #========================
-# 下载 CN IPv4 CIDR 并生成 nft set 文件（修复：无尾逗号/去 CRLF/过滤脏行）
+# 下载 CN IPv4 CIDR 并生成 nft set（无尾逗号/去 CRLF/过滤脏行）
 #========================
 log "下载 CN IPv4 CIDR 并生成 nft set：set_cn4"
 if ! run "wget -O /root/splittunnel/ipset/cn4.txt '$CN4_URL'"; then
@@ -334,7 +349,6 @@ BEGIN{
   print "  elements = {"
   first=1
 }
-# 注释/空行跳过
 /^[[:space:]]*#/ { next }
 /^[[:space:]]*$/ { next }
 {
@@ -351,11 +365,16 @@ END{
 ' /tmp/cn4.clean.txt > /root/splittunnel/ipset/cn4.nft || fail "生成 cn4.nft 失败。" "检查磁盘空间与文件权限。"
 
 #========================
-# 写入 nftables 规则文件（修复：不使用 define 宏；不写空 elements；tproxy 明确指定 ip family）
+# 写入 nftables 独立表规则文件（关键：不要放 /etc/nftables.d）
 #========================
-cat > /etc/nftables.d/99-xray-transparent.nft <<EOF
+run "mkdir -p '$NFT_DIR'" || fail "创建 $NFT_DIR 失败。" "检查文件系统是否只读或空间不足。"
+
+# 清理旧位置：避免 fw4 include 解析失败
+run "rm -f /etc/nftables.d/99-xray-transparent.nft" || true
+
+cat > "$NFT_FILE" <<EOF
 #!/usr/sbin/nft -f
-# OpenWrt 23.05 fw4 兼容：自定义透明分流表（仅本文件为自定义规则）
+# OpenWrt 23.05 fw4 兼容：自定义透明分流表（独立表，不参与 fw4 include）
 # 强制：CN 目的 IP 命中 @set_cn4 立即 return（硬绕过，不进 Xray inbound）
 
 table inet xray_tproxy {
@@ -376,42 +395,33 @@ table inet xray_tproxy {
   chain prerouting_mangle {
     type filter hook prerouting priority -150; policy accept;
 
-    # 0) 已标记连接：恢复 mark，减少重复判断
     ct mark 1 meta mark set ct mark accept
 
-    # 1) 保留/回环/组播/广播绕过
     ip daddr { 0.0.0.0/8, 127.0.0.0/8, 224.0.0.0/4, 255.255.255.255 } return
-
-    # 2) 私网/保留网段绕过
     ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } return
-
-    # 3) 本 LAN/主路由/旁路由自身绕过（展开为真实值）
     ip daddr { $LAN_SUBNET, $MAIN_ROUTER_IP, $SIDECAR_IP } return
 
-    # 4) 指定设备绕过
     ip saddr @set_bypass_clients return
 
-    # 5) 【强制硬绕过】CN 目的 IP：必须在任何 tproxy 动作之前 return
+    # 【强制硬绕过】CN 目的 IP：必须在任何 tproxy 动作之前 return
     ip daddr @set_cn4 return
 
-    # 6) dnsmasq 动态集合优先引流（关键修复：tproxy 明确指定 ip family）
+    # dnsmasq 动态集合优先引流（tproxy 必须显式 family）
     ip daddr @set_force_wg0_v4 meta l4proto { tcp, udp } ct state new \\
       ct mark set 1 meta mark set 1 tproxy ip to :$TPROXY_PORT accept
 
-    # 7) 默认：非 CN TCP/UDP 透明引流进入 Xray（关键修复：tproxy 明确指定 ip family）
+    # 默认：非 CN 引流
     meta l4proto { tcp, udp } ct state new \\
       ct mark set 1 meta mark set 1 tproxy ip to :$TPROXY_PORT accept
   }
 }
 EOF
 
-# 先语法检查，给出明确错误
-if ! nft -c -f /etc/nftables.d/99-xray-transparent.nft >/dev/null 2>&1; then
+if ! nft -c -f "$NFT_FILE" >/dev/null 2>&1; then
   log "错误：nftables 语法检查失败，以下为 nft 输出（前 120 行）："
-  nft -c -f /etc/nftables.d/99-xray-transparent.nft 2>&1 | sed -n '1,120p' | tee -a "$LOG_FILE"
-  fail "nftables 规则语法检查未通过。" "重点检查：/root/splittunnel/ipset/cn4.nft 是否有脏行；以及内核模块是否齐全。"
+  nft -c -f "$NFT_FILE" 2>&1 | sed -n '1,120p' | tee -a "$LOG_FILE"
+  fail "nftables 规则语法检查未通过。" "重点检查：/root/splittunnel/ipset/cn4.nft 是否有脏行；tproxy 模块是否齐全。"
 fi
-
 
 #========================
 # 写入 Xray conf.d（工程拆分）
@@ -513,7 +523,7 @@ cat > /etc/xray/config.json <<EOF
 EOF
 
 #========================
-# 写入 dnsmasq 分流配置
+# 写入 dnsmasq 分流配置（不修改 /etc/config/dhcp）
 #========================
 cat > /etc/dnsmasq.d/split.conf <<EOF
 listen-address=$SIDECAR_IP
@@ -528,8 +538,11 @@ cache-size=10000
 min-cache-ttl=60
 
 no-resolv
+
+# 默认：所有解析走本机 Xray DNS（出国解析走 wg0），避免泄漏
 server=127.0.0.1#$XRAY_DNS_PORT
 
+# CN 域名由 /etc/dnsmasq.d/40-cn-domains.conf 指定国内 DNS（直连）
 conf-file=/root/splittunnel/domains/proxy_domains.dnsmasq.conf
 EOF
 
@@ -586,11 +599,26 @@ run "ip rule add fwmark $MARK_WG_HEX lookup $TABLE_WG priority 110" || fail "添
 run "ip route add default dev $WG_IFACE table $TABLE_WG" || fail "添加 ip route 失败（wg0 出口）" "检查 wg0 是否存在/是否 UP。"
 
 #========================
-# 载入 nftables
+# 将自定义 nft 独立表挂接到 fw4（/etc/firewall.user）
 #========================
-log "载入 nftables 规则（并确保不重复）"
-run "nft delete table inet xray_tproxy 2>/dev/null || true"
-run "nft -f /etc/nftables.d/99-xray-transparent.nft" || fail "nftables 载入失败。" "建议先执行：nft -c -f /etc/nftables.d/99-xray-transparent.nft 查看具体报错。"
+log "将自定义 nftables 独立表挂接到 fw4（/etc/firewall.user）"
+
+if [ ! -f /etc/firewall.user ]; then
+  run "touch /etc/firewall.user" || fail "创建 /etc/firewall.user 失败。" "检查只读文件系统或权限问题。"
+fi
+
+# 幂等：删除旧块再写入
+run "sed -i '/^# SPLITTUNNEL-BEGIN\$/,/^# SPLITTUNNEL-END\$/d' /etc/firewall.user" || true
+
+cat >> /etc/firewall.user <<EOF
+# SPLITTUNNEL-BEGIN
+# 旁路由分流：加载自定义 nftables 独立表（避免放 /etc/nftables.d/ 导致 fw4 include 解析失败）
+nft delete table inet xray_tproxy >/dev/null 2>&1 || true
+nft -f $NFT_FILE >/dev/null 2>&1
+# SPLITTUNNEL-END
+EOF
+
+log "已写入 /etc/firewall.user：fw4 重启时将自动加载 $NFT_FILE"
 
 #========================
 # Xray include 降级逻辑（强制）
@@ -674,11 +702,26 @@ EOF
 fi
 
 #========================
-# 重启服务（强制）
+# 重启服务（强制：输出 fw4 诊断）
 #========================
 log "重启/重载服务：network / firewall / dnsmasq / xray"
 run "/etc/init.d/network reload || true"
-run "/etc/init.d/firewall restart" || fail "firewall 重启失败。" "检查 fw4 状态：logread -e fw4；nft list ruleset。"
+
+if ! /etc/init.d/firewall restart >>"$LOG_FILE" 2>&1; then
+  log "错误：firewall 重启失败。将输出 fw4 诊断信息（写入日志）"
+
+  log "==== fw4 check（末 200 行）===="
+  fw4 check 2>&1 | tail -n 200 | tee -a "$LOG_FILE"
+
+  log "==== fw4 print（末 200 行）===="
+  fw4 print 2>&1 | tail -n 200 | tee -a "$LOG_FILE"
+
+  log "==== logread -e fw4（末 200 行）===="
+  logread -e fw4 | tail -n 200 | tee -a "$LOG_FILE"
+
+  fail "firewall 重启失败。" "重点看日志中的 fw4 check/print 与 fw4 相关报错行；常见原因是 fw4 主规则或模块缺失。"
+fi
+
 run "/etc/init.d/dnsmasq restart" || fail "dnsmasq 重启失败。" "检查 dnsmasq-full 是否安装、配置是否冲突。"
 run "/etc/init.d/xray restart" || fail "xray 重启失败。" "检查 /etc/xray/config.json 与 /tmp/xray-error.log。"
 
@@ -725,6 +768,13 @@ if [ -n "$DNSMASQ_CONF" ]; then
   fi
 else
   log "dnsmasq 配置：提示（未找到 /var/etc/dnsmasq.conf.*，无法进行 --test 定位）"
+fi
+
+# 强制验收标准 1：证明 CN return 在 tproxy 前（给出提示）
+if nft list chain inet xray_tproxy prerouting_mangle 2>/dev/null | grep -n "ip daddr @set_cn4 return" >/dev/null 2>&1; then
+  log "验收标准 1：已找到规则：ip daddr @set_cn4 return（建议执行：nft list chain inet xray_tproxy prerouting_mangle 查看顺序）"
+else
+  log "验收标准 1：异常（未找到 ip daddr @set_cn4 return）"
 fi
 
 if nft list chain inet xray_tproxy prerouting_mangle >/dev/null 2>&1 && ss -ntulp 2>/dev/null | grep -q ":$TPROXY_PORT"; then
