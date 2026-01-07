@@ -8,19 +8,19 @@ wget -U "" -O expand-root.sh "https://openwrt.org/_export/code/docs/guide-user/a
 # Source the script (creates /etc/uci-defaults/70-rootpt-resize and /etc/uci-defaults/80-rootpt-resize, and adds them to /etc/sysupgrade.conf so they will be re-run after a sysupgrade)
 . ./expand-root.sh
  
-# Resize root partition and filesystem (will resize partiton, reboot resize filesystem, and reboot again)
+调整根分区和文件系统的大小（将调整分区大小，重新启动调整文件系统大小，然后再次重新启动）
+
 sh /etc/uci-defaults/70-rootpt-resize
 
-Re-running Script
+重新运行脚本
 
-If the root partition has already been expanded and the expand-root.sh script has previously run, attempting to run it again will not work by default. To perform an additional root expansion, you need remove previous script flags:
+如果根分区已被扩展，并且之前已运行过expand-root.sh脚本，则默认情况下尝试再次运行它不起作用。要执行额外的根扩展，您需要删除之前的脚本标志：
 
-rm /etc/rootpt-resize
-rm /etc/rootfs-resize
+rm /etc/rootpt-resize rm /etc/rootfs-resize
 
-Open the /etc/sysupgrade.conf file and remove the following lines:
+打开/etc/sysupgrade.conf文件，并删除以下行：
 
-/etc/uci-defaults/70-rootpt-resize
+/etc/uci-defaults/70-rootpt-resize 
 /etc/uci-defaults/80-rootfs-resize
 
-This ensures that the system no longer considers the scripts as already executed and then you can re-run script.
+这确保了系统不再认为脚本已执行，然后您可以重新运行脚本。
