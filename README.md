@@ -17,8 +17,10 @@ If the root partition has already been expanded and the expand-root.sh script ha
 
 rm /etc/rootpt-resize
 rm /etc/rootfs-resize
+
 Open the /etc/sysupgrade.conf file and remove the following lines:
 
 /etc/uci-defaults/70-rootpt-resize
 /etc/uci-defaults/80-rootfs-resize
+
 This ensures that the system no longer considers the scripts as already executed and then you can re-run script.
